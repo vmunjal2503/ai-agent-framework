@@ -2,6 +2,14 @@
 
 A lightweight Python framework for building AI agents that can reason, plan, use tools, and collaborate. Inspired by ReAct, AutoGPT, and CrewAI — but simple enough to understand and extend.
 
+## Why I Built This
+
+**The Problem:** Existing AI agent frameworks (LangChain, AutoGPT, CrewAI) are either massively over-engineered with hundreds of abstractions, or too simplistic for real use. LangChain has 3,000+ files and changes its API every week. AutoGPT burns through tokens with unfocused reasoning. Teams want to build AI agents that can search the web, write code, call APIs, and collaborate — but they don't want to learn a 50,000-line framework to do it.
+
+**The Solution:** A clean, understandable agent framework in ~1,500 lines of Python. Each component does one thing well: the `Agent` class implements the ReAct (Reason → Act → Observe) loop, `Tools` are simple classes with a `run()` method, `Memory` stores conversation history and past learnings, and `Orchestrators` coordinate multiple agents (sequential, parallel, or hierarchical). Want to add a custom tool? Write 10 lines of code. Want to understand how the agent reasons? Read one file.
+
+**Built because I needed agents for real projects** — automating research, code generation, report writing — and found that existing frameworks either do too much or too little. This hits the sweet spot: powerful enough for production, simple enough to understand in an afternoon.
+
 ```
 ┌──────────────────────────────────────────────────────────────────────┐
 │                       Agent Architecture                             │
