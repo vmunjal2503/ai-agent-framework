@@ -6,31 +6,30 @@
 
 ## What is this?
 
-An AI agent is an LLM (like GPT-4) that can **do things**, not just chat. You give it a goal and tools, and it:
-
-1. **Thinks** about what to do
-2. **Uses a tool** (search the web, run code, read a file)
-3. **Looks at the result**
-4. **Repeats** until the goal is done
+An AI agent is an LLM (like GPT-4) that can **do things**, not just chat. You give it a goal and tools, and it runs a reasoning loop:
 
 ```
 You: "Find the top 3 Python web frameworks and compare their speed"
 
-Agent thinking:
-  Step 1: "I need to search the web for Python framework benchmarks"
-          → Uses web_search tool → Gets results
+Agent reasoning loop (ReAct pattern):
 
-  Step 2: "Let me get more details from this benchmark article"
-          → Uses web_scraper tool → Gets the page content
+  THINK:  "I need to search the web for Python framework benchmarks"
+  ACT:    web_search("python web framework benchmarks 2024")
+  OBSERVE: [Results from Google: TechEmpower benchmarks, blog posts...]
 
-  Step 3: "I should verify with another source"
-          → Uses web_search tool → Gets more results
+  THINK:  "Let me get the actual benchmark numbers from this article"
+  ACT:    web_scraper("https://techempower.com/benchmarks/...")
+  OBSERVE: [FastAPI: 42k req/s, Django: 8k req/s, Flask: 12k req/s]
 
-  Step 4: "I have enough info. Let me compile the comparison."
-          → Returns final answer with data from 3 sources
+  THINK:  "I should verify with another source"
+  ACT:    web_search("fastapi vs django vs flask performance comparison")
+  OBSERVE: [More data confirming the numbers]
+
+  THINK:  "I have enough data. Let me compile the comparison."
+  RETURN: Final answer with data from 3 sources
 ```
 
-You can also have **multiple agents work together** — one researches, one writes code, one writes the report.
+The agent decides **which tool to use**, **what input to pass**, and **when it has enough information to stop**. You can also have **multiple agents work together** — one researches, one writes code, one writes the report.
 
 ---
 
@@ -44,24 +43,98 @@ You can also have **multiple agents work together** — one researches, one writ
 
 ---
 
+## The ReAct reasoning loop
+
+This is the core algorithm that makes an agent work:
+
+```
+┌─────────────────────────────────────────────────┐
+│                  Agent Loop                      │
+│                                                  │
+│  ┌──────────┐                                    │
+│  │  THINK   │ LLM decides what to do next        │
+│  │          │ Output: reasoning + chosen tool     │
+│  └────┬─────┘                                    │
+│       │                                          │
+│       ▼                                          │
+│  ┌──────────┐                                    │
+│  │   ACT    │ Execute the chosen tool             │
+│  │          │ Input: tool name + parameters       │
+│  └────┬─────┘                                    │
+│       │                                          │
+│       ▼                                          │
+│  ┌──────────┐                                    │
+│  │ OBSERVE  │ Append tool result to context       │
+│  │          │ LLM sees what happened              │
+│  └────┬─────┘                                    │
+│       │                                          │
+│       ▼                                          │
+│  ┌──────────┐    No                              │
+│  │  DONE?   │────────▶ Back to THINK             │
+│  │          │                                    │
+│  └────┬─────┘                                    │
+│       │ Yes                                      │
+│       ▼                                          │
+│  Return final answer                             │
+│  (max 10 iterations as safety limit)             │
+└─────────────────────────────────────────────────┘
+```
+
+### How the LLM decides
+
+```python
+# The agent sends this to the LLM at each step:
+{
+  "system": "You are an agent. Respond with JSON: {thought, tool, tool_input} or {thought, final_answer}",
+  "messages": [
+    {"role": "user", "content": "Find top 3 Python frameworks..."},
+    {"role": "assistant", "content": "{thought: 'I need to search...', tool: 'web_search', tool_input: '...'}"},
+    {"role": "user", "content": "Tool result: [search results here]"},
+    # ... conversation grows with each Think→Act→Observe cycle
+  ]
+}
+
+# The LLM sees its own previous reasoning + tool results
+# and decides the next action. When it has enough info,
+# it returns {final_answer: "..."} instead of another tool call.
+```
+
+---
+
 ## What can the agent do?
 
 The agent has **tools** it can choose from:
 
-| Tool | What it does | Example |
-|------|-------------|---------|
-| **Web Search** | Searches Google/Bing for current information | "Find the latest Python release" |
-| **Web Scraper** | Reads a web page and extracts the text | "Read the content of this URL" |
-| **Code Executor** | Writes and runs Python code | "Calculate the average of this data" |
-| **File System** | Reads, writes, and lists files | "Save this report to report.md" |
-| **API Client** | Calls any REST API | "Get the current Bitcoin price from CoinGecko" |
-| **Calculator** | Does math | "What is 15% of 2,340?" |
+| Tool | What it does | Implementation |
+|------|-------------|----------------|
+| **Web Search** | Searches Google/Bing for current information | `httpx` call to search API, returns top 10 results with title + snippet + URL |
+| **Web Scraper** | Reads a web page and extracts text | `httpx` + `BeautifulSoup`. Strips HTML tags, scripts, styles. Returns clean text. |
+| **Code Executor** | Writes and runs Python code | Executes in a sandboxed `subprocess` with 30s timeout. Captures stdout + stderr. |
+| **File System** | Reads, writes, and lists files | Scoped to a working directory. Path traversal protection (`..` blocked). |
+| **API Client** | Calls any REST API | `httpx` with configurable method, headers, body. Parses JSON response. |
+| **Calculator** | Evaluates math expressions | Python `ast.literal_eval` for safety — no arbitrary code execution via eval(). |
 
-You can also **create your own tools** in 10 lines of code.
+### Create your own tool (10 lines)
+
+```python
+from tools.base import BaseTool
+
+class StockPriceTool(BaseTool):
+    name = "stock_price"
+    description = "Get the current price of a stock. Input: ticker symbol (e.g., AAPL)"
+
+    def run(self, input: str) -> str:
+        import httpx
+        response = httpx.get(f"https://api.example.com/price/{input}")
+        return f"${response.json()['price']}"
+
+# The LLM reads the tool's `name` and `description` to decide when to use it.
+# That's the entire interface — name, description, run(input) → string.
+```
 
 ---
 
-## How to use it
+## Single agent vs. multi-agent
 
 ### Single Agent
 
@@ -76,7 +149,6 @@ agent = Agent(
 )
 
 result = agent.run("What are the top 3 Python web frameworks in 2024?")
-print(result)
 ```
 
 ### Multiple Agents Working Together
@@ -112,38 +184,48 @@ orchestrator = Orchestrator(agents=[researcher, developer, writer])
 result = orchestrator.run("Compare FastAPI vs Django performance and write a report")
 ```
 
-### Multi-Agent Strategies
+---
 
-| Strategy | How it works | Good for |
-|----------|-------------|----------|
-| **Sequential** | Agent 1 finishes → passes result to Agent 2 → Agent 2 passes to Agent 3 | Research → Analyze → Report pipelines |
-| **Parallel** | All agents work on the same goal at the same time, results are merged | Getting multiple perspectives quickly |
-| **Hierarchical** | A "manager" agent creates a plan and assigns tasks to "worker" agents | Complex projects with many subtasks |
+## Multi-agent orchestration strategies
+
+| Strategy | How it works | When to use | Implementation |
+|----------|-------------|-------------|----------------|
+| **Sequential** | Agent 1 → passes output → Agent 2 → Agent 3 | Research → Analyze → Report pipelines | Each agent's `final_answer` becomes the next agent's input. Chain of responsibility. |
+| **Parallel** | All agents work on the same goal simultaneously | Getting multiple perspectives quickly | `asyncio.gather()` runs all agents concurrently. Results merged by a synthesis step. |
+| **Hierarchical** | A "manager" agent creates a plan and delegates to "worker" agents | Complex projects with many subtasks | Manager uses `PlannerAgent` to break goal into steps, assigns each step to a specialist agent. |
 
 ---
 
-## How to create your own tool
+## Memory systems
 
-```python
-from tools.base import BaseTool
+| Memory Type | What it stores | How it works | Lifetime |
+|-------------|---------------|-------------|----------|
+| **Short-term** | Current conversation | List of messages (user prompts + tool results) | Cleared after each task |
+| **Long-term** | Permanent knowledge | Vector embeddings in ChromaDB. Semantic search to recall relevant past knowledge. | Persistent across tasks |
+| **Episodic** | Past task results | Task description + outcome pairs. Agent checks "have I done something like this before?" | Persistent, grows over time |
 
-class StockPriceTool(BaseTool):
-    name = "stock_price"
-    description = "Get the current price of a stock. Input: ticker symbol (e.g., AAPL)"
-
-    def run(self, input: str) -> str:
-        # Your logic here — call an API, query a database, etc.
-        import httpx
-        response = httpx.get(f"https://api.example.com/price/{input}")
-        return f"${response.json()['price']}"
-
-# Now your agent can check stock prices
-agent = Agent(
-    name="Finance Bot",
-    role="Answer questions about stocks",
-    tools=[StockPriceTool()],
-)
 ```
+Agent receives new task: "Compare React vs Vue"
+     │
+     ├── Check episodic memory: "Did I do a similar comparison before?"
+     │   → Found: "Compare FastAPI vs Django" task from last week
+     │   → Uses same research strategy (search → scrape benchmarks → compare)
+     │
+     ├── Check long-term memory: "Do I know anything about React/Vue?"
+     │   → Found: stored knowledge about React hooks, Vue composition API
+     │   → Skips searching for basics, goes straight to comparison
+     │
+     └── Short-term memory: tracks this conversation's tool results
+```
+
+---
+
+## Safety and guardrails
+
+- **Max iterations (10)** — Agent can't loop forever. If it hasn't found an answer in 10 Think→Act→Observe cycles, it returns what it has.
+- **Tool sandboxing** — Code executor runs in a subprocess with a 30-second timeout. File system is scoped to a working directory.
+- **Structured output** — Agent must respond in JSON format (`{thought, tool, tool_input}` or `{thought, final_answer}`). Invalid JSON triggers a retry with an error message.
+- **No arbitrary eval()** — Calculator uses `ast.literal_eval`, not `eval()`. Prevents code injection via math expressions.
 
 ---
 
@@ -153,51 +235,36 @@ agent = Agent(
 ai-agent-framework/
 │
 ├── agents/                    # The brains
-│   ├── base.py                # Core agent: Think → Act → Observe loop
-│   ├── planner.py             # Breaks big goals into smaller steps
-│   └── critic.py              # Checks if an agent's output is good enough
+│   ├── base.py                # Core Agent: ReAct loop (Think → Act → Observe), JSON parsing, tool dispatch
+│   ├── planner.py             # PlannerAgent: breaks goals into structured step-by-step plans (JSON output)
+│   └── critic.py              # CriticAgent: evaluates outputs → {score, passed, issues[], suggestions[]}
 │
 ├── tools/                     # Things the agent can do
-│   ├── base.py                # Template for creating new tools
-│   ├── web_search.py          # Search the web
-│   ├── web_scraper.py         # Read web pages
-│   ├── code_executor.py       # Run Python code
-│   ├── file_system.py         # Read/write files
-│   ├── api_client.py          # Call REST APIs
-│   └── calculator.py          # Do math
+│   ├── base.py                # BaseTool abstract class: name, description, run(input) → string
+│   ├── web_search.py          # Search API wrapper (httpx, returns top 10 results)
+│   ├── web_scraper.py         # HTML → clean text (BeautifulSoup, strips scripts/styles)
+│   ├── code_executor.py       # Sandboxed Python execution (subprocess, 30s timeout)
+│   ├── file_system.py         # Scoped file I/O (read/write/list, path traversal blocked)
+│   ├── api_client.py          # REST API caller (configurable method/headers/body)
+│   └── calculator.py          # Safe math evaluation (ast.literal_eval, not eval)
 │
 ├── memory/                    # What the agent remembers
-│   ├── short_term.py          # Current conversation (cleared after each task)
-│   ├── long_term.py           # Permanent knowledge stored in a vector database
-│   └── episodic.py            # Past task results (learns from experience)
+│   ├── short_term.py          # Current conversation messages (list, cleared per task)
+│   ├── long_term.py           # Vector DB knowledge store (ChromaDB, semantic search)
+│   └── episodic.py            # Past task results (task → outcome pairs, pattern matching)
 │
 ├── orchestrator/              # Coordinate multiple agents
-│   ├── sequential.py          # One after another
-│   ├── parallel.py            # All at the same time
-│   └── hierarchical.py        # Manager assigns work to workers
+│   ├── sequential.py          # Chain: agent1.output → agent2.input → agent3.input
+│   ├── parallel.py            # Concurrent: asyncio.gather(), results merged
+│   └── hierarchical.py       # Manager creates plan, delegates steps to worker agents
 │
 ├── examples/                  # Working examples you can run
-│   ├── research_agent.py      # Single agent: web research
-│   ├── code_agent.py          # Single agent: writes and runs code
-│   └── multi_agent_report.py  # 3 agents collaborate on a report
+│   ├── research_agent.py      # Single agent: web research task
+│   ├── code_agent.py          # Single agent: writes and runs Python code
+│   └── multi_agent_report.py  # 3 agents collaborate: research → code → report
 │
-└── tests/                     # Unit tests
-```
-
----
-
-## Installation
-
-```bash
-git clone https://github.com/vmunjal2503/ai-agent-framework.git
-cd ai-agent-framework
-pip install -r requirements.txt
-
-cp .env.example .env
-# Add your OpenAI API key
-
-# Try an example
-python examples/research_agent.py
+└── tests/                     # Unit tests (pytest)
+    └── test_tools.py          # Tests for Calculator (safe eval) and FileSystem (path safety)
 ```
 
 ---
